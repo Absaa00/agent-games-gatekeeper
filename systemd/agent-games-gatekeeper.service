@@ -1,0 +1,23 @@
+# Systemd unit for running the agent on this VM (fallback hosting).
+# Mirrors the telegram-bot pattern: unit file lives in the repo, is symlinked
+# into /etc/systemd/system, and reads secrets from an env file (never here).
+# The VM path needs a public HTTPS front-end (e.g. a Cloudflare Tunnel) —
+# see README.md "Hosting". Prefer fly.io (fly.toml) for the live endpoint.
+[Unit]
+Description=Agent Games Proof Gatekeeper agent (ABSAA-1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/environment
+Environment=NODE_USE_ENV_PROXY=1
+WorkingDirectory=/home/hatch/workspace/agent-games-gatekeeper
+EnvironmentFile=/home/hatch/workspace/agent-games-gatekeeper/.env
+ExecStart=/usr/bin/node /home/hatch/workspace/agent-games-gatekeeper/src/server.js
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=120
+
+[Install]
+WantedBy=multi-user.target
