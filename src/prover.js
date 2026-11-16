@@ -1,26 +1,49 @@
 // Groth16 decision proving with snarkjs (gatekeeper circuit).
 //
-// STATUS: DISABLED BY DEFAULT — see config.js GATEKEEPER_PROVE.
-// The public docs publish the circuit artifacts (wasm/zkey) and the vkHash,
-// but they do NOT publish the circuit's input-signal mapping (which task
-// fields feed which circuit signals) nor the exact response field names for
-// the proof. Generating a proof with a guessed mapping produces an invalid
-// proof, which scores the same as no proof (-2, no bonus) and risks nothing
-// extra — but a wrong proof is still a wrong proof, so this module refuses
-// to run until a mapping is supplied in circuits/input-mapping.json.
-//
-// To enable proving after the mapping is confirmed (practice-mode feedback,
-// platform docs, or the circuit source):
-//   1. Copy circuits/input-mapping.json.example to circuits/input-mapping.json
-//      and fill in the real signal names.
-//   2. Set GATEKEEPER_PROVE=1 and KURIER_API_KEY.
-//   3. Restart. The server then attaches { proof, public_signals } to each
-//      response and submits the proof to Kurier, adding `proofReference`.
-//
-// UNCONFIRMED HYPOTHESIS (do NOT use without confirmation): the circuit has
-// 13 public inputs and the task carries 11 input fields + task_id + the
-// decision = 13 values. That count match is suggestive but NOT evidence of
-// the mapping (inputs may be hashes, and the order is unknown).
+// STATUS: MAPPING CONFIRMED 2026-11-16 (local, read-only verification).
+// The 13 input-signal names were read from gatekeeper.wasm itself via
+// getInputSignalSize (calibrated: unknown names return 0), and fullProve +
+// groth16.verify against the real vk.json was run on the synthetic VALID
+// task from scripts/simulate-task.js:
+//   - VALID + APPROVE (decision=1) verifies; VALID + REJECT assert-fails.
+//   - Each single trap (vk mismatch, balance<minimum, expired, recipient
+//     mismatch, amount>max) + APPROVE assert-fails; + REJECT verifies.
+//   - decision=2 assert-fails. salt and taskId encodings are unconstrained
+//     for validity (any value verifies); vk hashes only need to be
+//     consistent with each other (blake2b-256 and keccak-256 both verified).
+//   - There is NO proof_tx input signal: PROOF_REUSED cannot be proven in
+//     this circuit (docs: REUSED tasks are excluded from the proof bonus),
+//     so proveDecision must not be called for them — the server already
+//     catches the assert failure and responds without a proof.
+// Residual unknown: the platform-side hash convention for vk/taskId (if the
+// platform re-derives expected public signals). Blake2b-256 is used here,
+// matching this repo's zkVerify hashing (src/onchain.js). Worst case a
+// platform-side mismatch scores the same as no proof (-2), never worse.
+// Enable with GATEKEEPER_PROVE=1 (and KURIER_API_KEY for on-chain submit).
+const FIELD_PRIME = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+
+let blake = null;
+function loadBlake() {
+  if (blake) return blake;
+  try {
+    blake = require('blakejs');
+    return blake;
+  } catch (err) {
+    throw new Error(`blakejs unavailable: ${err.message}`);
+  }
+}
+
+// Blake2b-256 of raw bytes (0x hex) or a UTF-8 string, as a decimal field
+// element (mod the bn128 scalar prime).
+function blake2b256Field(value) {
+  const b = loadBlake();
+  let bytes;
+  const s = String(value);
+  if (/^0x[0-9a-fA-F]+$/.test(s)) bytes = Buffer.from(s.slice(2), 'hex');
+  else bytes = Buffer.from(s, 'utf8');
+  const digest = b.blake2b(bytes, null, 32);
+  return (BigInt('0x' + Buffer.from(digest).toString('hex')) % FIELD_PRIME).toString(10);
+}
 'use strict';
 
 const fs = require('fs');
@@ -64,16 +87,27 @@ function provingAvailable() {
 // Mapping format: { "<circuit signal>": "<task field path | literal>" }
 // Field paths are dot paths into the task object, e.g. "input.amount".
 // A value starting with "=" is a literal, e.g. "=1".
+// "$decision" maps APPROVE -> "1", REJECT -> "0".
+// An object {"hash":"blake2b256","from":"<dot path>"} hashes the field
+// (blake2b-256, as a decimal field element mod p).
+// Keys starting with "_" in the mapping file are documentation, skipped.
 function buildInputs(task, decision) {
   const mapping = JSON.parse(fs.readFileSync(MAPPING_PATH, 'utf8'));
   const input = {};
   const getPath = (obj, p) => p.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
   for (const [signal, spec] of Object.entries(mapping)) {
+    if (signal.startsWith('_')) continue;
     let value;
     if (typeof spec === 'string' && spec.startsWith('=')) {
       value = spec.slice(1);
     } else if (spec === '$decision') {
-      value = decision;
+      value = decision === 'APPROVE' ? '1' : '0';
+    } else if (spec && typeof spec === 'object' && spec.hash === 'blake2b256' && typeof spec.from === 'string') {
+      const raw = spec.from === 'task_id' ? task.task_id : getPath(task, spec.from);
+      if (raw === undefined || raw === null || raw === '') {
+        throw new Error(`mapping: no value for signal ${signal} (spec ${JSON.stringify(spec)})`);
+      }
+      value = blake2b256Field(raw);
     } else if (typeof spec === 'string') {
       value = getPath(task, spec);
     } else {

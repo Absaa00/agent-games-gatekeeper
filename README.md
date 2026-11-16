@@ -160,17 +160,24 @@ that the strategy is the owner's decision, not the model's.
 
 ## Known unknowns (honest limitations)
 
-1. **Groth16 decision-proof input mapping — UNCONFIRMED.** The public docs
-   publish the circuit artifacts and vkHash but not which task fields feed
-   which circuit signals, nor the exact response field names for the proof.
-   The circuit has 13 public inputs; the task has 11 input fields +
-   `task_id` + the decision = 13 values (a suggestive count match, not
-   evidence). `GATEKEEPER_PROVE` is therefore **off by default** and the
-   prover refuses to run without a confirmed `circuits/input-mapping.json`
-   (see `circuits/input-mapping.json.example`). The decision engine is the
-   main scoring surface (+12 per correct decision); a correct decision
-   without a proof still scores +10 (12 − 2). Confirm the mapping via
-   practice-mode feedback or the platform docs, then enable proving.
+1. **Groth16 decision-proof input mapping — CONFIRMED 2026-11-16.**
+   The 13 input-signal names were read from `gatekeeper.wasm` itself
+   (`getInputSignalSize`, calibrated against bogus names) and a proof was
+   generated + verified against the real `vk.json` for a VALID task
+   (APPROVE verifies, REJECT assert-fails) and for each single trap
+   (APPROVE assert-fails, REJECT verifies). Real signals (camelCase):
+   `amount, conditionRecipient, currentBlock, decision, expiryBlock,
+   maxTransfer, minimum, proofVkHash, publicBalance, recipient,
+   registeredVkHash, salt, taskId` — note: NO `proof_tx` signal, and the
+   vk fields are hashes. Encoding used (`circuits/input-mapping.json`):
+   vk hashes = blake2b-256 of the raw vk bytes, taskId = blake2b-256 of the
+   task_id string, decision APPROVE=1/REJECT=0, salt="0"; any consistent
+   hash verifies cryptographically, so the only residual unknown is the
+   platform-side hash convention (worst case: proof counts as invalid,
+   −2 — the same as no proof). `GATEKEEPER_PROVE=1` + the mapping file
+   enables proving; the decision engine is the main scoring surface
+   (+12 per correct decision with a valid proof, +10 without, plus up to
+   +5/round reliability bonus).
 2. **On-chain proof lookup — UNVERIFIED from this VM.** The zkVerify
    WebSocket RPC (`wss://zkverify-rpc.zkverify.io`) did not connect from
    this VM (20 s timeout, twice) and the HTTP RPC never answers; Subscan's
